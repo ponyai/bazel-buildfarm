@@ -144,6 +144,7 @@ public abstract class CASFileCache implements ContentAddressableStorage {
   private final Executor accessRecorder;
   private final ExecutorService expireService;
   private Thread prometheusMetricsThread;
+  private Thread cacheExpirationThread;
 
   private final Map<Digest, DirectoryEntry> directoryStorage = Maps.newConcurrentMap();
   private final DirectoriesIndex directoriesIndex;
@@ -1217,6 +1218,35 @@ public abstract class CASFileCache implements ContentAddressableStorage {
             },
             "Prometheus CAS Metrics Collector");
     prometheusMetricsThread.start();
+
+    // Start cache expiration daemon
+    cacheExpirationThread = new Thread(
+            () -> {
+              int intervalInSeconds = 5;
+              // Assume it could exipre whole cache in 1 days.
+              float expirationRatioEachRound = intervalInSeconds / (60 * 60 * 24);
+              long expireSizeEachRound = maxSizeInBytes * expirationRatioEachRound;
+              // Persistently expire cache until amount ratio reaches 0.7
+              long cacheSizeLowerBound = maxSizeInBytes * 0.7;
+              logger.log(Level.INFO, format("Start daemon to peridically expire cache: interval=%ds, "
+                      "expireSizeEachRound=%d bytes, cacheSizeLowerBound=%d bytes",
+                      interval, expireSizeEachRound, cacheSizeLowerBound));
+              while (!Thread.currentThread().isInterrupted()) {
+                try {
+                  if (size() > cacheSizeLowerBound) {
+                    expireCache(expireSizeEachRound, cacheSizeLowerBound);
+                  }
+                  TimeUnit.SECONDS.sleep(intervalInSeconds);
+                } catch (InterruptedException e) {
+                  Thread.currentThread().interrupt();
+                  break;
+                } catch (Exception e) {
+                  logger.log(Level.SEVERE, "Could not able to expire cache", e);
+                }
+              }
+            },
+            "Cache expiration daemon");
+    cacheExpirationThread.start();
 
     // return information about the cache startup.
     StartupCacheResults startupResults = new StartupCacheResults();
@@ -2449,6 +2479,74 @@ public abstract class CASFileCache implements ContentAddressableStorage {
       if (requiresDischarge.get()) {
         dischargeAndNotify(blobSizeInBytes);
       }
+    }
+  }
+
+  private void expireCache(long bytesToExpire, long bytesLowerBound)
+      throws IOException, InterruptedException {
+    boolean interrupted = false;
+    Iterable<ListenableFuture<Digest>> expiredDigestsFutures;
+    synchronized (this) {
+      long startSizeInBytes = sizeInBytes;
+      ImmutableList.Builder<ListenableFuture<Digest>> builder = ImmutableList.builder();
+      try {
+        while (!interrupted && sizeInBytes > bytesLowerBound && sizeInBytes - startSizeInBytes < bytesToExpire) {
+          ListenableFuture<Entry> expiredFuture = expireEntry(bytesToExpire, expireService);
+          interrupted = Thread.interrupted();
+          if (expiredFuture != null) {
+            builder.add(
+                transformAsync(
+                    expiredFuture,
+                    (expiredEntry) -> {
+                      String expiredKey = expiredEntry.key;
+                      try {
+                        Files.delete(getPath(expiredKey));
+                      } catch (NoSuchFileException eNoEnt) {
+                        logger.log(
+                            Level.SEVERE,
+                            format(
+                                "CASFileCache::expireCache: expired key %s did not exist to delete",
+                                expiredKey));
+                      }
+                      FileEntryKey fileEntryKey = parseFileEntryKey(expiredKey, expiredEntry.size);
+                      if (fileEntryKey == null) {
+                        logger.log(
+                            Level.SEVERE, format("CASFileCache::expireCache: error parsing expired key %s", expiredKey));
+                      } else if (storage.containsKey(
+                          getKey(fileEntryKey.getDigest(), !fileEntryKey.getIsExecutable()))) {
+                        return immediateFuture(null);
+                      }
+                      expiredKeyCounter.inc();
+                      logger.log(Level.INFO, format("expired key %s (by expireCache)", expiredKey));
+                      return immediateFuture(fileEntryKey.getDigest());
+                    },
+                    expireService));
+          }
+        }
+      } catch (InterruptedException e) {
+        // clear interrupted flag, latter would re-throw
+        Thread.interrupted();
+        interrupted = true;
+      }
+      expiredDigestsFutures = builder.build();
+    }
+
+    ImmutableSet.Builder<Digest> builder = ImmutableSet.builder();
+    for (ListenableFuture<Digest> expiredDigestFuture : expiredDigestsFutures) {
+      Digest digest = getOrIOException(expiredDigestFuture);
+      if (Thread.interrupted()) {
+        interrupted = true;
+      }
+      if (digest != null) {
+        builder.add(digest);
+      }
+    }
+    Set<Digest> expiredDigests = builder.build();
+    if (!expiredDigests.isEmpty()) {
+      onExpire.accept(expiredDigests);
+    }
+    if (interrupted || Thread.currentThread().isInterrupted()) {
+      throw new InterruptedException();
     }
   }
 
