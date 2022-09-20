@@ -124,6 +124,7 @@ import com.google.protobuf.Duration;
 import com.google.protobuf.util.Durations;
 import com.google.rpc.Code;
 import io.grpc.Channel;
+import io.grpc.Context;
 import io.grpc.ManagedChannel;
 import io.grpc.Status;
 import io.grpc.StatusRuntimeException;
@@ -578,6 +579,7 @@ public class StubInstance implements Instance {
       ServerCallStreamObserver<ByteString> blobObserver,
       RequestMetadata requestMetadata) {
     throwIfStopped();
+    logger.log(Level.INFO, String.format("[Server send request] %s/%d Context %s", blobDigest.getHash(), blobDigest.getSizeBytes(), Context.current().getDeadline()));
     bsStub
         .get()
         .withInterceptors(attachMetadataInterceptor(requestMetadata))

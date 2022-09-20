@@ -52,6 +52,7 @@ import com.google.protobuf.Any;
 import com.google.protobuf.ByteString;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.grpc.Status;
+import io.grpc.Context;
 import io.grpc.Status.Code;
 import io.grpc.stub.ServerCallStreamObserver;
 import java.io.IOException;
@@ -118,6 +119,7 @@ public class ShardWorkerInstance extends AbstractServerInstance {
       ServerCallStreamObserver<ByteString> blobObserver,
       RequestMetadata requestMetadata) {
     Preconditions.checkState(count != 0);
+    logger.log(Level.INFO, String.format("[Worker get request] %s/%d Context %s", digest.getHash(), digest.getSizeBytes(), Context.current().getDeadline()));
     contentAddressableStorage.get(
         digest,
         offset,
@@ -125,7 +127,9 @@ public class ShardWorkerInstance extends AbstractServerInstance {
         new UniformDelegateServerCallStreamObserver<ByteString>(blobObserver) {
           @Override
           public void onNext(ByteString data) {
+            logger.log(Level.INFO, String.format("[Worker send back] %s/%d size %d Context %s", digest.getHash(), digest.getSizeBytes(), data.size(), Context.current().getDeadline()));
             blobObserver.onNext(data);
+            logger.log(Level.INFO, String.format("[Worker send back done] %s/%d size %d Context %s", digest.getHash(), digest.getSizeBytes(), data.size(), Context.current().getDeadline()));
           }
 
           void removeBlobLocation() {

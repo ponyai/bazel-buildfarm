@@ -755,9 +755,11 @@ public class ShardInstance extends AbstractServerInstance {
 
               @Override
               public void onNext(ByteString nextChunk) {
+                logger.log(Level.INFO, String.format("[Server receive onNext] %s/%d chunk %d Context %s", blobDigest.getHash(), blobDigest.getSizeBytes(), nextChunk.size(), Context.current().getDeadline()));
                 blobObserver.onNext(nextChunk);
                 received += nextChunk.size();
                 ioMetric.observe(received);
+                logger.log(Level.INFO, String.format("[Server receive onNext done] %s/%d chunk %d Context %s", blobDigest.getHash(), blobDigest.getSizeBytes(), nextChunk.size(), Context.current().getDeadline()));
               }
 
               @Override
